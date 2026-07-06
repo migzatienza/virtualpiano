@@ -188,6 +188,7 @@
     <div class="row"><span class="label">Hands</span><span id="stat-hand"><span class="dot" id="dot-hand"></span>Not found</span></div>
     <div class="row"><span class="label">Sustain</span><span id="stat-sustain"><span class="dot" id="dot-sustain"></span>Off</span></div>
     <div class="row"><span class="label">FPS</span><span id="stat-fps">--</span></div>
+    <div class="row"><span class="label">Engine</span><span id="stat-engine">—</span></div>
     <div class="row"><span class="label">Target key</span><span id="stat-aim">—</span></div>
     <div class="row" style="margin-top:6px; display:block;">
       <span class="label">Now playing</span><br><span id="notes-playing">—</span>
@@ -647,9 +648,28 @@ let handLandmarker = null;
 let handFrameId = null;
 let lastVideoTime = -1;
 let handTrackTimestamp = 0;
+let activeDelegate = "GPU";
+let lastDetectAt = 0;
 const overlayCanvas = document.getElementById("overlay-canvas");
 const overlayCtx = overlayCanvas.getContext("2d");
 const videoEl = document.getElementById("webcam");
+
+// Hand detection runs on a small, downscaled copy of the video frame instead of the
+// full 1280x720 feed. Landmark coordinates come back normalized (0..1) either way,
+// so accuracy/mapping is unaffected — but inference is dramatically faster, which
+// matters a lot on CPU-delegate fallback. Aspect ratio is preserved.
+const detectCanvas = document.createElement("canvas");
+const detectCtx = detectCanvas.getContext("2d", { willReadFrequently: true });
+function getDetectFrameSource(){
+  const targetW = activeDelegate === "GPU" ? 640 : 320;
+  const scale = targetW / videoEl.videoWidth;
+  const targetH = Math.max(1, Math.round(videoEl.videoHeight * scale));
+  if (detectCanvas.width !== targetW || detectCanvas.height !== targetH){
+    detectCanvas.width = targetW; detectCanvas.height = targetH;
+  }
+  detectCtx.drawImage(videoEl, 0, 0, targetW, targetH);
+  return detectCanvas;
+}
 
 function getPokeMargin(){
   const sensAdjust = (0.5 - STATE.sensitivity) * 0.022;
@@ -810,11 +830,15 @@ async function initHandTracking(){
   try {
     landmarkerOptions.baseOptions.delegate = "GPU";
     handLandmarker = await HandLandmarker.createFromOptions(vision, landmarkerOptions);
+    activeDelegate = "GPU";
   } catch (gpuErr){
     console.warn("GPU hand landmarker unavailable, falling back to CPU.", gpuErr);
     landmarkerOptions.baseOptions.delegate = "CPU";
     handLandmarker = await HandLandmarker.createFromOptions(vision, landmarkerOptions);
+    activeDelegate = "CPU";
   }
+  const engineEl = document.getElementById("stat-engine");
+  if (engineEl) engineEl.textContent = activeDelegate;
 }
 
 async function startCameraFeed(){
@@ -852,15 +876,25 @@ function startHandFrameLoop(){
   if (handFrameId) cancelAnimationFrame(handFrameId);
 
   function tick(){
-    if (!STATE.cameraRunning || !handLandmarker) return;
+    if (!STATE.cameraRunning || !handLandmarker){ handFrameId = requestAnimationFrame(tick); return; }
 
-    if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    const now = performance.now();
+    // Throttle: cap detection rate so a slow (esp. CPU-delegate) inference call can
+    // never eat the whole frame budget and starve the Three.js render loop.
+    // GPU delegate can afford ~20/sec; CPU delegate is throttled harder to ~8/sec.
+    const minInterval = activeDelegate === "GPU" ? 50 : 120;
+    const dueForDetection = now - lastDetectAt >= minInterval;
+
+    if (dueForDetection &&
+        videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         videoEl.videoWidth > 0 &&
         videoEl.currentTime !== lastVideoTime){
       lastVideoTime = videoEl.currentTime;
+      lastDetectAt = now;
       handTrackTimestamp += 33; // monotonic ms for VIDEO mode
       try {
-        const results = handLandmarker.detectForVideo(videoEl, handTrackTimestamp);
+        const frameSource = getDetectFrameSource();
+        const results = handLandmarker.detectForVideo(frameSource, handTrackTimestamp);
         onHandResultsWrapper({ multiHandLandmarks: results.landmarks || [] });
       } catch (e){
         console.warn("Hand detection frame error:", e);
