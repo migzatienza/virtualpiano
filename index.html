@@ -1,0 +1,1444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Piano in Air — Play Piano With Your Hands</title>
+
+<!-- ===================== CDN DEPENDENCIES ===================== -->
+<!-- Three.js — 3D rendering of the piano keyboard -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<!-- MediaPipe Hand Landmarker (tasks-vision) — modern two-hand tracking -->
+<script type="module">
+  import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+  window.__mpVision = { HandLandmarker, FilesetResolver };
+</script>
+
+<style>
+  :root{
+    --bg-0:#05070a;
+    --bg-1:#0a0f16;
+    --panel:#0d1420cc;
+    --cyan:#5ef2ff;
+    --violet:#b07bff;
+    --amber:#ffb454;
+    --red:#ff5d6c;
+    --text-dim:#7c8a9c;
+    --text:#dce8f2;
+    --border:#1c2a3a;
+    font-family:'JetBrains Mono','Consolas',monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:radial-gradient(ellipse at 50% 0%, #0d1826 0%, var(--bg-0) 70%);
+    color:var(--text);
+    overflow:hidden;
+    font-family:'JetBrains Mono','Consolas',monospace;
+  }
+  #app{ position:relative; width:100vw; height:100vh; }
+
+  /* ---------- full-screen webcam background ---------- */
+  #webcam{
+    position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    display:block; z-index:0; background:#000;
+  }
+  #webcam.mirrored{ transform:scaleX(-1); }
+  /* Dark vignette/tint so the UI and piano stay readable over the live feed */
+  #cam-tint{
+    position:absolute; inset:0; z-index:1; pointer-events:none;
+    background:
+      radial-gradient(ellipse at 50% 40%, #05070a15 0%, #05070a99 78%, #05070ac0 100%),
+      linear-gradient(180deg, #05070a90 0%, #05070a20 22%, #05070a20 70%, #05070aa0 100%);
+  }
+  /* ---------- 3D canvas (transparent, floats above the video) ---------- */
+  #three-canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; z-index:2; }
+
+  /* Hand landmark overlay — intrinsic size is set to match the video's native
+     resolution in JS, then object-fit:cover keeps it pixel-aligned with #webcam
+     regardless of viewport size (both are cropped identically by the browser). */
+  #overlay-canvas{
+    position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    pointer-events:none; z-index:3;
+  }
+  #overlay-canvas.mirrored{ transform:scaleX(-1); }
+
+  /* ---------- top title bar ---------- */
+  #title-bar{
+    position:absolute; top:16px; left:16px; z-index:20;
+    display:flex; flex-direction:column; gap:2px;
+  }
+  #title-bar h1{
+    margin:0; font-size:20px; letter-spacing:.12em; font-weight:700;
+    color:var(--text); text-shadow:0 0 18px #5ef2ff55;
+  }
+  #title-bar h1 span{ color:var(--cyan); }
+  #title-bar p{ margin:0; font-size:11px; color:var(--text-dim); letter-spacing:.05em; }
+
+  /* ---------- status panel ---------- */
+  #status-panel{
+    position:absolute; left:16px; top:78px; z-index:20;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; width:230px; backdrop-filter:blur(6px);
+    font-size:12px; line-height:1.9;
+  }
+  #status-panel .row{ display:flex; justify-content:space-between; gap:8px; }
+  #status-panel .label{ color:var(--text-dim); }
+  #stat-aim{ color:var(--violet); font-weight:600; }
+  .dot{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--red); box-shadow:0 0 6px currentColor;}
+  .dot.on{ background:var(--cyan); color:var(--cyan); }
+  #notes-playing{ color:var(--amber); font-weight:600; }
+
+  /* ---------- control dock (bottom) ---------- */
+  #dock{
+    position:absolute; bottom:18px; left:50%; transform:translateX(-50%);
+    z-index:20; display:flex; align-items:center; gap:10px;
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:12px 16px; backdrop-filter:blur(8px);
+    box-shadow:0 8px 40px #000a;
+  }
+  button.btn{
+    background:#101c2b; color:var(--text); border:1px solid var(--border);
+    padding:9px 14px; border-radius:8px; font-family:inherit; font-size:12px;
+    letter-spacing:.04em; cursor:pointer; transition:.15s; white-space:nowrap;
+  }
+  button.btn:hover{ border-color:var(--cyan); color:var(--cyan); box-shadow:0 0 12px #5ef2ff33; }
+  button.btn.active{ background:var(--cyan); color:#00131a; border-color:var(--cyan); font-weight:700; }
+  button.btn.active.violet{ background:var(--violet); border-color:var(--violet); color:#0d0518;}
+  #dock .slider-group{ display:flex; flex-direction:column; align-items:center; gap:2px; padding:0 6px; }
+  #dock .slider-group label{ font-size:9px; color:var(--text-dim); letter-spacing:.08em; text-transform:uppercase;}
+  #dock input[type=range]{ width:90px; accent-color:var(--cyan); }
+  #dock .divider{ width:1px; align-self:stretch; background:var(--border); margin:0 2px; }
+
+  /* ---------- practice panel ---------- */
+  #practice-panel{
+    position:absolute; top:78px; right:16px; z-index:20; width:220px;
+    margin-top:180px;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; backdrop-filter:blur(6px); font-size:12px; display:none;
+  }
+  #practice-panel.show{ display:block; }
+  #practice-panel h3{ margin:0 0 8px; font-size:12px; letter-spacing:.08em; color:var(--violet); }
+  #practice-sequence{ display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
+  .seq-note{
+    font-size:10px; padding:3px 6px; border-radius:4px; border:1px solid var(--border);
+    color:var(--text-dim);
+  }
+  .seq-note.next{ border-color:var(--amber); color:var(--amber); box-shadow:0 0 8px #ffb45455; }
+  .seq-note.done{ color:var(--cyan); border-color:var(--cyan); opacity:.6; }
+  #practice-feedback{ font-weight:700; font-size:14px; min-height:20px; }
+  #practice-feedback.correct{ color:var(--cyan); }
+  #practice-feedback.wrong{ color:var(--red); }
+  #practice-stats{ display:flex; justify-content:space-between; color:var(--text-dim); margin-top:6px;}
+  #practice-stats b{ color:var(--text); }
+
+  /* ---------- calibration modal ---------- */
+  #calib-modal{
+    position:absolute; inset:0; z-index:50; background:#000b;
+    display:none; align-items:center; justify-content:center;
+  }
+  #calib-modal.show{ display:flex; }
+  #calib-box{
+    width:420px; background:#0c1420; border:1px solid var(--cyan); border-radius:14px;
+    padding:26px 28px; box-shadow:0 0 60px #5ef2ff33; text-align:center;
+  }
+  #calib-box h2{ margin:0 0 10px; color:var(--cyan); font-size:16px; letter-spacing:.08em; }
+  #calib-box p{ font-size:12px; color:var(--text-dim); line-height:1.6; }
+  #calib-progress{ height:6px; border-radius:3px; background:#1c2a3a; margin:16px 0; overflow:hidden;}
+  #calib-progress-bar{ height:100%; width:0%; background:var(--cyan); transition:width .1s linear; }
+  #calib-threshold-row{ display:flex; align-items:center; justify-content:center; gap:10px; margin-top:14px; }
+  #calib-threshold-row label{ font-size:11px; color:var(--text-dim); }
+
+  /* ---------- boot / permission overlay ---------- */
+  #boot-overlay{
+    position:absolute; inset:0; z-index:60; background:var(--bg-0);
+    display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px;
+    text-align:center; padding:20px;
+  }
+  #boot-overlay.hide{ display:none; }
+  #boot-overlay h2{ font-size:22px; letter-spacing:.1em; color:var(--text); margin:0;}
+  #boot-overlay h2 span{ color:var(--cyan); }
+  #boot-overlay p{ max-width:480px; color:var(--text-dim); font-size:13px; line-height:1.7; margin:0;}
+  #boot-error{ color:var(--red); font-size:12px; max-width:480px; display:none; }
+  #boot-overlay button.btn{ padding:12px 26px; font-size:13px; }
+
+  ::selection{ background:#5ef2ff44; }
+  #instructions-hint{
+    position:absolute; bottom:100px; left:50%; transform:translateX(-50%);
+    z-index:19; font-size:11px; color:var(--text-dim); text-align:center;
+    background:#0008; padding:6px 14px; border-radius:20px; border:1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <video id="webcam" autoplay playsinline muted></video>
+  <div id="cam-tint"></div>
+  <canvas id="three-canvas"></canvas>
+  <canvas id="overlay-canvas"></canvas>
+
+  <div id="title-bar">
+    <h1>PIANO <span>IN AIR</span></h1>
+    <p>touchless 3D keyboard · hand-tracked · web audio synth</p>
+  </div>
+
+  <div id="status-panel">
+    <div class="row"><span class="label">Camera</span><span id="stat-camera"><span class="dot" id="dot-camera"></span>Off</span></div>
+    <div class="row"><span class="label">Hands</span><span id="stat-hand"><span class="dot" id="dot-hand"></span>Not found</span></div>
+    <div class="row"><span class="label">Sustain</span><span id="stat-sustain"><span class="dot" id="dot-sustain"></span>Off</span></div>
+    <div class="row"><span class="label">FPS</span><span id="stat-fps">--</span></div>
+    <div class="row"><span class="label">Target key</span><span id="stat-aim">—</span></div>
+    <div class="row" style="margin-top:6px; display:block;">
+      <span class="label">Now playing</span><br><span id="notes-playing">—</span>
+    </div>
+  </div>
+
+  <div id="instructions-hint">Pinch thumb+index over a key to play. The target key glows amber when aligned.</div>
+
+  <div id="practice-panel">
+    <h3>PRACTICE — Twinkle Twinkle</h3>
+    <div id="practice-sequence"></div>
+    <div id="practice-feedback">Get ready…</div>
+    <div id="practice-stats"><span>Score: <b id="practice-score">0</b></span><span>Streak: <b id="practice-streak">0</b></span></div>
+  </div>
+
+  <div id="dock">
+    <button class="btn" id="btn-camera">▶ Start Camera</button>
+    <button class="btn" id="btn-sustain">Sustain (Space)</button>
+    <button class="btn" id="btn-practice">Practice Mode</button>
+    <button class="btn" id="btn-calibrate">Calibrate</button>
+    <div class="divider"></div>
+    <div class="slider-group">
+      <label>Volume</label>
+      <input type="range" id="slider-volume" min="0" max="100" value="70">
+    </div>
+    <div class="slider-group">
+      <label>Sensitivity</label>
+      <input type="range" id="slider-sensitivity" min="0" max="100" value="50">
+    </div>
+    <div class="divider"></div>
+    <label style="font-size:11px; color:var(--text-dim); display:flex; align-items:center; gap:6px; cursor:pointer;">
+      <input type="checkbox" id="chk-mirror" checked style="accent-color:var(--cyan);"> Mirror
+    </label>
+  </div>
+
+  <!-- Calibration modal -->
+  <div id="calib-modal">
+    <div id="calib-box">
+      <h2>CALIBRATION</h2>
+      <p>Hold your hand up above the piano at the relaxed, hovering distance you want to play from — <b>don't press down</b>. Keep it steady for 3 seconds while we learn your resting depth.</p>
+      <div id="calib-progress"><div id="calib-progress-bar"></div></div>
+      <p id="calib-status">Waiting for hand…</p>
+      <div id="calib-threshold-row">
+        <label>Touch threshold</label>
+        <input type="range" id="slider-threshold" min="0" max="100" value="50">
+      </div>
+    </div>
+  </div>
+
+  <!-- Boot / permission overlay -->
+  <div id="boot-overlay">
+    <h2>PIANO <span>IN AIR</span></h2>
+    <p>A touchless piano you play with your hands in front of a webcam. Click below to grant camera access and load the hand-tracking model. This app needs to run on <b>localhost</b> or over <b>HTTPS</b> — browsers block camera access on plain <code>file://</code> or insecure origins.</p>
+    <button class="btn" id="btn-boot-start">▶ Start Camera &amp; Load Piano</button>
+    <p id="boot-error"></p>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+/* =====================================================================================
+   PIANO IN AIR
+   A touchless, webcam-driven 3D piano.
+   Sections below: CONFIG, AUDIO ENGINE, 3D SCENE, HAND TRACKING, PRACTICE MODE, UI WIRING.
+   ===================================================================================== */
+
+/* --------------------------------------------------------------------------------
+   1. CONFIG & GLOBAL STATE
+   -------------------------------------------------------------------------------- */
+const CONFIG = {
+  octaves: [4, 5],           // two octaves => 24 keys (14 white + 10 black)
+  whiteKeyWidth: 0.6,
+  whiteKeyDepth: 2.2,
+  whiteKeyHeight: 0.35,
+  blackKeyWidth: 0.36,
+  blackKeyDepth: 1.3,
+  blackKeyHeight: 0.5,
+  pressDepth: 0.12,          // how far a key visually sinks when pressed
+  basePokeMargin: 0.016,
+  basePinchThreshold: 0.048, // thumb–index distance — pinch = press
+  releasePokeRatio: 0.42,
+  pressConfirmFrames: 2,
+  pinchConfirmFrames: 1,     // pinch registers instantly
+  hitMagnetFactor: 1.45,     // aim-assist radius multiplier
+  maxFingerVelocity: 2.2,
+  sustainReleaseTime: 2.4,   // seconds of release when sustain pedal is held
+  normalReleaseTime: 0.35,   // seconds of release with no sustain
+};
+
+const STATE = {
+  cameraRunning: false,
+  handDetected: false,
+  handsCount: 0,
+  sustain: false,
+  practiceMode: false,
+  mirrored: true,
+  volume: 0.7,
+  sensitivity: 0.5,          // 0..1 slider value, affects touch threshold
+  calibration: {
+    active: false,
+    xMin: 0.15,
+    xMax: 0.85,
+    pokeOffset: 0,           // fine-tuned by the calibration threshold slider
+  },
+  fps: 0,
+  lastFrameTime: performance.now(),
+  fingerStates: {},          // per fingertip tracking, keyed by "hand-fingerName"
+  activeNoteLabels: new Set(), // currently sounding note names, for the status panel
+  aimKeyName: null,            // key currently under the primary play point
+};
+
+/* --------------------------------------------------------------------------------
+   2. NOTE / FREQUENCY TABLE
+   -------------------------------------------------------------------------------- */
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+function noteToFrequency(name, octave){
+  // Equal temperament, A4 = 440Hz reference.
+  const semitoneIndex = NOTE_NAMES.indexOf(name);
+  const semitonesFromA4 = (octave - 4) * 12 + (semitoneIndex - NOTE_NAMES.indexOf("A"));
+  return 440 * Math.pow(2, semitonesFromA4 / 12);
+}
+
+// Build the 24-key layout: pattern of white/black keys repeated across the configured octaves.
+const OCTAVE_PATTERN = [
+  {type:"white", name:"C"}, {type:"black", name:"C#"},
+  {type:"white", name:"D"}, {type:"black", name:"D#"},
+  {type:"white", name:"E"},
+  {type:"white", name:"F"}, {type:"black", name:"F#"},
+  {type:"white", name:"G"}, {type:"black", name:"G#"},
+  {type:"white", name:"A"}, {type:"black", name:"A#"},
+  {type:"white", name:"B"},
+];
+
+const KEYS = []; // { name, octave, type, freq, x (world center), mesh, isPressed, label }
+
+(function buildKeyLayout(){
+  let whiteIndex = 0;
+  CONFIG.octaves.forEach(octave => {
+    OCTAVE_PATTERN.forEach(entry => {
+      if (entry.type === "white"){
+        const x = whiteIndex * CONFIG.whiteKeyWidth;
+        KEYS.push({ name:entry.name, octave, type:"white", freq:noteToFrequency(entry.name, octave), x, xCenterOffset: CONFIG.whiteKeyWidth/2 });
+        whiteIndex++;
+      } else {
+        // Black key sits on the boundary between the previous and next white key.
+        const x = whiteIndex * CONFIG.whiteKeyWidth;
+        KEYS.push({ name:entry.name, octave, type:"black", freq:noteToFrequency(entry.name, octave), x, xCenterOffset:0 });
+      }
+    });
+  });
+  // Center the whole keyboard around x = 0
+  const totalWidth = whiteIndex * CONFIG.whiteKeyWidth;
+  KEYS.forEach(k => { k.x = k.x - totalWidth/2 + k.xCenterOffset; });
+})();
+
+function fullNoteName(key){ return key.name + key.octave; }
+
+/* --------------------------------------------------------------------------------
+   3. AUDIO ENGINE (Web Audio API)
+   Each note gets its own oscillator pair + gain envelope (attack/decay/sustain/release).
+   A shared reverb (convolver) and delay bus give the notes some space.
+   -------------------------------------------------------------------------------- */
+const Audio_ = (() => {
+  let ctx = null;
+  let masterGain, reverbWet, reverbNode, delayNode, delayWet, dryGain;
+  const voices = {}; // keyed by note full-name -> { osc1, osc2, gainNode, releasing }
+
+  function init(){
+    if (ctx) return;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    masterGain = ctx.createGain();
+    masterGain.gain.value = STATE.volume;
+
+    // --- simple algorithmic reverb using a generated impulse response ---
+    reverbNode = ctx.createConvolver();
+    reverbNode.buffer = createImpulseResponse(2.2, 2.5);
+    reverbWet = ctx.createGain(); reverbWet.gain.value = 0.22;
+
+    // --- single echo tap (no feedback loop — feedback caused endless noise) ---
+    delayNode = ctx.createDelay(1.0); delayNode.delayTime.value = 0.22;
+    delayWet = ctx.createGain(); delayWet.gain.value = 0.12;
+
+    dryGain = ctx.createGain(); dryGain.gain.value = 1.0;
+
+    dryGain.connect(masterGain);
+    reverbWet.connect(reverbNode).connect(masterGain);
+    delayWet.connect(delayNode).connect(masterGain);
+    masterGain.connect(ctx.destination);
+  }
+
+  function createImpulseResponse(duration, decay){
+    const rate = ctx.sampleRate;
+    const length = rate * duration;
+    const impulse = ctx.createBuffer(2, length, rate);
+    for (let ch = 0; ch < 2; ch++){
+      const data = impulse.getChannelData(ch);
+      for (let i = 0; i < length; i++){
+        data[i] = (Math.random()*2 - 1) * Math.pow(1 - i/length, decay);
+      }
+    }
+    return impulse;
+  }
+
+  // velocity: 0..1, how hard/fast the "press" was -> affects peak volume
+  function noteOn(key, velocity){
+    if (!ctx) return;
+    const id = fullNoteName(key);
+    // Retrigger cleanly if the same note is already sounding.
+    if (voices[id]) hardStop(id);
+
+    const now = ctx.currentTime;
+    const peak = 0.08 + velocity * 0.35; // velocity affects loudness
+    const attack = 0.008 + (1-velocity) * 0.01; // slightly softer attacks are slightly slower
+    const decayTime = 0.18;
+    const sustainLevel = peak * 0.55;
+
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(peak, now + attack);          // ATTACK
+    gainNode.gain.linearRampToValueAtTime(sustainLevel, now + attack + decayTime); // DECAY -> SUSTAIN
+
+    // Two detuned-ish oscillators approximate a richer, piano-like timbre.
+    const osc1 = ctx.createOscillator(); osc1.type = "triangle"; osc1.frequency.value = key.freq;
+    const osc2 = ctx.createOscillator(); osc2.type = "sine"; osc2.frequency.value = key.freq * 2.01;
+    const osc2Gain = ctx.createGain(); osc2Gain.gain.value = 0.18;
+
+    osc1.connect(gainNode);
+    osc2.connect(osc2Gain).connect(gainNode);
+
+    gainNode.connect(dryGain);
+    gainNode.connect(reverbWet);
+    gainNode.connect(delayWet);
+
+    osc1.start(now); osc2.start(now);
+    voices[id] = { osc1, osc2, osc2Gain, gainNode, releasing:false, sustainLevel };
+  }
+
+  function noteOff(id, sustainOn){
+    const v = voices[id];
+    if (!v) return;
+    if (v.releasing && !sustainOn) return hardStop(id);
+    v.releasing = true;
+    const now = ctx.currentTime;
+    const releaseTime = sustainOn ? CONFIG.sustainReleaseTime : CONFIG.normalReleaseTime;
+    v.gainNode.gain.cancelScheduledValues(now);
+    const currentGain = Math.max(v.gainNode.gain.value, 0.0001);
+    v.gainNode.gain.setValueAtTime(currentGain, now);
+    v.gainNode.gain.exponentialRampToValueAtTime(0.0001, now + releaseTime);
+    const stopAt = now + releaseTime + 0.03;
+    try { v.osc1.stop(stopAt); v.osc2.stop(stopAt); } catch(e){}
+    setTimeout(() => hardStop(id), (releaseTime + 0.06) * 1000);
+  }
+
+  function hardStop(id){
+    const v = voices[id];
+    if (!v) return;
+    const now = ctx ? ctx.currentTime : 0;
+    try {
+      v.gainNode.gain.cancelScheduledValues(now);
+      v.gainNode.gain.setValueAtTime(0, now);
+      v.osc1.stop(now);
+      v.osc2.stop(now);
+      v.osc1.disconnect();
+      v.osc2.disconnect();
+      if (v.osc2Gain) v.osc2Gain.disconnect();
+      v.gainNode.disconnect();
+    } catch(e){}
+    delete voices[id];
+  }
+
+  function releaseAllSustained(){
+    Object.keys(voices).slice().forEach(id => hardStop(id));
+  }
+
+  function killAllVoices(){
+    Object.keys(voices).slice().forEach(id => hardStop(id));
+  }
+
+  function setVolume(v){ STATE.volume = v; if (masterGain) masterGain.gain.value = v; }
+  function isVoiceActive(id){ return !!voices[id]; }
+
+  return { init, noteOn, noteOff, setVolume, isVoiceActive, releaseAllSustained, killAllVoices,
+           get ctxState(){ return ctx ? ctx.state : "not-created"; },
+           resume(){ if (ctx && ctx.state === "suspended") ctx.resume(); } };
+})();
+
+/* --------------------------------------------------------------------------------
+   4. THREE.JS 3D SCENE — the piano keyboard
+   -------------------------------------------------------------------------------- */
+let scene, camera, renderer, keyGroup;
+const keyMeshByFullName = {};
+
+function initThreeScene(){
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x05070a, 0.045);
+
+  const canvas = document.getElementById("three-canvas");
+  camera = new THREE.PerspectiveCamera(42, window.innerWidth/window.innerHeight, 0.1, 100);
+  // Angled camera so the piano reads as a 3D object, not a flat top-down strip.
+  camera.position.set(0, 6.4, 7.6);
+  camera.lookAt(0, 0, -1.2);
+
+  renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  // --- lighting ---
+  const ambient = new THREE.AmbientLight(0x2a3a55, 0.9);
+  scene.add(ambient);
+
+  const key1 = new THREE.DirectionalLight(0x9fd8ff, 1.1);
+  key1.position.set(-4, 8, 6);
+  key1.castShadow = true;
+  key1.shadow.mapSize.set(2048, 2048);
+  key1.shadow.camera.left = -10; key1.shadow.camera.right = 10;
+  key1.shadow.camera.top = 10; key1.shadow.camera.bottom = -10;
+  scene.add(key1);
+
+  const rim = new THREE.PointLight(0xb07bff, 1.4, 20);
+  rim.position.set(4, 3, -3);
+  scene.add(rim);
+
+  // --- subtle stage platform under the keyboard (small + semi-transparent so the
+  //     live camera feed behind it stays visible, instead of an opaque floor
+  //     blotting out the whole background) ---
+  const totalKeyboardWidth = whiteKeyCount() * CONFIG.whiteKeyWidth;
+  const platGeo = new THREE.PlaneGeometry(totalKeyboardWidth + 3, CONFIG.whiteKeyDepth + 3);
+  const platMat = new THREE.MeshStandardMaterial({
+    color:0x0a1420, roughness:0.3, metalness:0.7,
+    transparent:true, opacity:0.45
+  });
+  const platform = new THREE.Mesh(platGeo, platMat);
+  platform.rotation.x = -Math.PI/2;
+  platform.position.set(0, -CONFIG.whiteKeyHeight/2 - 0.01, -0.4);
+  platform.receiveShadow = true;
+  scene.add(platform);
+
+  keyGroup = new THREE.Group();
+  scene.add(keyGroup);
+  buildKeyMeshes();
+  computeKeyScreenRects();
+
+  window.addEventListener("resize", onResize);
+}
+
+function makeLabelSprite(text, color){
+  const canvas = document.createElement("canvas");
+  canvas.width = 128; canvas.height = 64;
+  const ctx2d = canvas.getContext("2d");
+  ctx2d.fillStyle = "rgba(0,0,0,0)"; ctx2d.fillRect(0,0,128,64);
+  ctx2d.font = "bold 34px monospace";
+  ctx2d.fillStyle = color;
+  ctx2d.textAlign = "center"; ctx2d.textBaseline = "middle";
+  ctx2d.fillText(text, 64, 34);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map:tex, transparent:true, depthTest:false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.5, 0.25, 1);
+  return sprite;
+}
+
+function buildKeyMeshes(){
+  KEYS.forEach(key => {
+    let geo, mat, mesh;
+    if (key.type === "white"){
+      geo = new THREE.BoxGeometry(CONFIG.whiteKeyWidth*0.94, CONFIG.whiteKeyHeight, CONFIG.whiteKeyDepth);
+      mat = new THREE.MeshStandardMaterial({ color:0xf4f7fb, roughness:0.45, metalness:0.05, emissive:0x000000 });
+      mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(key.x, 0, 0.2);
+    } else {
+      geo = new THREE.BoxGeometry(CONFIG.blackKeyWidth, CONFIG.blackKeyHeight, CONFIG.blackKeyDepth);
+      mat = new THREE.MeshStandardMaterial({ color:0x0d1016, roughness:0.35, metalness:0.25, emissive:0x000000 });
+      mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(key.x, CONFIG.whiteKeyHeight/2 - CONFIG.blackKeyHeight/2 + 0.05, -0.15);
+    }
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    mesh.userData.baseY = mesh.position.y;
+    mesh.userData.key = key;
+    keyGroup.add(mesh);
+    key.mesh = mesh;
+    key.isPressed = false;
+    key.pressAnim = 0; // 0..1 animated press amount
+
+    // Note label, on the front-top face of the key.
+    const label = makeLabelSprite(fullNoteName(key), key.type==="white" ? "#33455c" : "#5ef2ff");
+    label.position.set(key.x, mesh.position.y + (key.type==="white"?CONFIG.whiteKeyHeight/2+0.02:CONFIG.blackKeyHeight/2+0.02), mesh.position.z + (key.type==="white"?CONFIG.whiteKeyDepth/2-0.25:CONFIG.blackKeyDepth/2-0.18));
+    label.rotation_baseY = mesh.position.y;
+    keyGroup.add(label);
+    key.label = label;
+
+    keyMeshByFullName[fullNoteName(key)] = key;
+  });
+}
+
+// Visually press / release a key, and set its glow color while active.
+function setKeyVisualPressed(key, pressed, glowColor){
+  key.isPressed = pressed;
+  key.targetGlow = pressed ? (glowColor || "#5ef2ff") : null;
+}
+
+function animateKeys(dt){
+  KEYS.forEach(key => {
+    const targetPress = key.isPressed ? 1 : 0;
+    key.pressAnim += (targetPress - key.pressAnim) * Math.min(1, dt*14);
+    const depthOffset = key.pressAnim * CONFIG.pressDepth;
+    key.mesh.position.y = key.mesh.userData.baseY - depthOffset;
+
+    // Glow: lerp emissive intensity based on press amount.
+    const mat = key.mesh.material;
+    if (key.pressAnim > 0.01){
+      const c = new THREE.Color(key.targetGlow || "#5ef2ff");
+      mat.emissive = c;
+      mat.emissiveIntensity = key.pressAnim * (key.type==="white" ? 0.55 : 0.9);
+    } else {
+      mat.emissiveIntensity = 0;
+    }
+
+    // Practice-mode "next key" highlight overrides idle color subtly (handled in Practice section).
+  });
+}
+
+function onResize(){
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  computeKeyScreenRects();
+}
+
+/* --------------------------------------------------------------------------------
+   5. HAND TRACKING (MediaPipe Hand Landmarker — two hands)
+   The core "AR" trick: each key's on-screen pixel footprint is computed once by
+   projecting its 3D corners through the same camera Three.js uses to render it.
+   Each video-normalized fingertip landmark is converted into that same screen
+   pixel space (undoing the object-fit:cover crop and the mirror flip), so a
+   fingertip is matched against the key it visually overlaps on screen — not an
+   abstract calibrated x-range. Landmark depth (z) still drives the press/release
+   edge and velocity, exactly as before.
+   -------------------------------------------------------------------------------- */
+const FINGER_TIPS = { thumb:4, index:8, middle:12, ring:16, pinky:20 };
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17]
+];
+const HAND_COLORS = ["#5ef2ff", "#ffb454"]; // left / right hand overlay colors
+
+let handLandmarker = null;
+let handFrameId = null;
+let lastVideoTime = -1;
+let handTrackTimestamp = 0;
+const overlayCanvas = document.getElementById("overlay-canvas");
+const overlayCtx = overlayCanvas.getContext("2d");
+const videoEl = document.getElementById("webcam");
+
+function getPokeMargin(){
+  const sensAdjust = (0.5 - STATE.sensitivity) * 0.022;
+  return CONFIG.basePokeMargin + sensAdjust + STATE.calibration.pokeOffset;
+}
+
+function getPinchThreshold(){
+  const sensAdjust = (STATE.sensitivity - 0.5) * 0.028;
+  return CONFIG.basePinchThreshold + sensAdjust;
+}
+
+// Wrist-relative depth: larger value = fingertip extended toward the camera.
+function getFingerPokeDepth(handLm, tipIdx){
+  return handLm[0].z - handLm[tipIdx].z;
+}
+
+function getPinchDistance(handLm){
+  const t = handLm[4], i = handLm[8];
+  return Math.hypot(t.x - i.x, t.y - i.y, (t.z - i.z) * 0.6);
+}
+
+function getPokeMargins(){
+  const press = getPokeMargin();
+  return { press, release: press * CONFIG.releasePokeRatio };
+}
+
+function isHandPinching(handLm){
+  return getPinchDistance(handLm) < getPinchThreshold();
+}
+
+// Project a 3D world point to CSS screen pixels (same space as the render camera).
+const _projVec = new THREE.Vector3();
+function projectWorldToScreen(x, y, z){
+  _projVec.set(x, y, z);
+  _projVec.project(camera);
+  return {
+    x: (_projVec.x + 1) / 2 * window.innerWidth,
+    y: (1 - _projVec.y) / 2 * window.innerHeight,
+  };
+}
+
+// Build per-key aim points on the front playing surface (where fingers visually land).
+function computeKeyScreenRects(){
+  KEYS.forEach(key => {
+    const isWhite = key.type === "white";
+    const w = isWhite ? CONFIG.whiteKeyWidth * 0.94 : CONFIG.blackKeyWidth;
+    const d = isWhite ? CONFIG.whiteKeyDepth : CONFIG.blackKeyDepth;
+    const h = isWhite ? CONFIG.whiteKeyHeight : CONFIG.blackKeyHeight;
+    const baseY = key.mesh.userData.baseY;
+    const cz = key.mesh.position.z;
+    const frontZ = cz + d * 0.48;
+    const playY = baseY + h * 0.38;
+
+    const samplePts = [
+      [key.x, playY, frontZ],
+      [key.x, baseY + h * 0.72, cz + d * 0.1],
+      [key.x - w * 0.28, playY, frontZ],
+      [key.x + w * 0.28, playY, frontZ],
+    ];
+    if (key.label){
+      samplePts.push([key.label.position.x, key.label.position.y, key.label.position.z]);
+    }
+
+    let cx = 0, cy = 0, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    samplePts.forEach(([x, y, z]) => {
+      const p = projectWorldToScreen(x, y, z);
+      cx += p.x; cy += p.y;
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    });
+    cx /= samplePts.length;
+    cy /= samplePts.length;
+
+    const rw = maxX - minX, rh = maxY - minY;
+    key.screenCenter = { x: cx, y: cy };
+    key.hitRadius = Math.max(rw, rh) * 0.52;
+    key.screenRect = {
+      minX: minX - rw * 0.18, maxX: maxX + rw * 0.18,
+      minY: minY - rh * 0.85, maxY: maxY + rh * 0.45,
+    };
+  });
+}
+
+// Undo the object-fit:cover crop + CSS mirror flip so a video-normalized landmark
+// (0..1) lands on the exact screen pixel the user visually sees it at.
+function videoNormalizedToScreenPx(nx, ny){
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  const bw = window.innerWidth, bh = window.innerHeight;
+  let x, y;
+  if (!vw || !vh){ x = nx*bw; y = ny*bh; }
+  else {
+    const mediaAspect = vw/vh, boxAspect = bw/bh;
+    let renderW, renderH, offsetX=0, offsetY=0;
+    if (boxAspect > mediaAspect){ renderW = bw; renderH = bw/mediaAspect; offsetY = (renderH-bh)/2; }
+    else { renderH = bh; renderW = bh*mediaAspect; offsetX = (renderW-bw)/2; }
+    x = nx*renderW - offsetX;
+    y = ny*renderH - offsetY;
+  }
+  if (STATE.mirrored) x = bw - x; // match the CSS scaleX(-1) mirror
+  return { x, y };
+}
+
+// Nearest-key match with magnetic aim-assist; black keys win ties.
+function findKeyAtScreenPoint(sx, sy){
+  let best = null, bestScore = -Infinity;
+  for (const key of KEYS){
+    if (!key.screenCenter) continue;
+    const dx = sx - key.screenCenter.x;
+    const dy = sy - key.screenCenter.y;
+    const dist = Math.hypot(dx, dy);
+    const reach = key.hitRadius * CONFIG.hitMagnetFactor;
+    if (dist > reach) continue;
+    let score = 1 - dist / reach;
+    if (key.type === "black") score += 0.32;
+    if (score > bestScore){ bestScore = score; best = key; }
+  }
+  return bestScore >= 0.18 ? best : null;
+}
+
+function getPinchPlayPoint(handLm){
+  const t = handLm[4], i = handLm[8];
+  return { nx: (t.x + i.x) / 2, ny: (t.y + i.y) / 2 };
+}
+
+function screenPointFromNormalized(nx, ny){
+  return videoNormalizedToScreenPx(nx, ny);
+}
+
+function velocityToGain(vel){
+  const norm = Math.max(0, Math.min(1, vel / CONFIG.maxFingerVelocity));
+  return Math.pow(norm, 0.6) * 0.9 + 0.1; // perceptual curve, never fully silent
+}
+
+function whiteKeyCount(){ return KEYS.filter(k=>k.type==="white").length; }
+
+async function initHandTracking(){
+  if (handLandmarker) return;
+  // Wait for the ESM module loader to expose HandLandmarker.
+  for (let i = 0; i < 80 && !window.__mpVision; i++){
+    await new Promise(r => setTimeout(r, 50));
+  }
+  if (!window.__mpVision) throw new Error("Hand tracking library failed to load — check your internet connection.");
+
+  const { HandLandmarker, FilesetResolver } = window.__mpVision;
+  const wasmRoot = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+  const modelUrl = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+  const vision = await FilesetResolver.forVisionTasks(wasmRoot);
+
+  const landmarkerOptions = {
+    baseOptions: { modelAssetPath: modelUrl },
+    numHands: 2,
+    runningMode: "VIDEO",
+    minHandDetectionConfidence: 0.4,
+    minHandPresenceConfidence: 0.4,
+    minTrackingConfidence: 0.4,
+  };
+
+  try {
+    landmarkerOptions.baseOptions.delegate = "GPU";
+    handLandmarker = await HandLandmarker.createFromOptions(vision, landmarkerOptions);
+  } catch (gpuErr){
+    console.warn("GPU hand landmarker unavailable, falling back to CPU.", gpuErr);
+    landmarkerOptions.baseOptions.delegate = "CPU";
+    handLandmarker = await HandLandmarker.createFromOptions(vision, landmarkerOptions);
+  }
+}
+
+async function startCameraFeed(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    throw new Error("This browser does not support camera access (getUserMedia unavailable).");
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: "user",
+      width:  { ideal: 1280, min: 640 },
+      height: { ideal: 720, min: 480 },
+      frameRate: { ideal: 30, min: 15 },
+    },
+    audio: false,
+  });
+
+  videoEl.srcObject = stream;
+  await new Promise((resolve, reject) => {
+    if (videoEl.readyState >= 1) return resolve();
+    videoEl.onloadedmetadata = () => resolve();
+    videoEl.onerror = () => reject(new Error("Video stream failed to load."));
+  });
+  await videoEl.play();
+  resizeOverlayIfNeeded();
+  computeKeyScreenRects();
+
+  lastVideoTime = -1;
+  handTrackTimestamp = 0;
+  STATE.cameraRunning = true;
+  startHandFrameLoop();
+}
+
+function startHandFrameLoop(){
+  if (handFrameId) cancelAnimationFrame(handFrameId);
+
+  function tick(){
+    if (!STATE.cameraRunning || !handLandmarker) return;
+
+    if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        videoEl.videoWidth > 0 &&
+        videoEl.currentTime !== lastVideoTime){
+      lastVideoTime = videoEl.currentTime;
+      handTrackTimestamp += 33; // monotonic ms for VIDEO mode
+      try {
+        const results = handLandmarker.detectForVideo(videoEl, handTrackTimestamp);
+        onHandResultsWrapper({ multiHandLandmarks: results.landmarks || [] });
+      } catch (e){
+        console.warn("Hand detection frame error:", e);
+      }
+    }
+    handFrameId = requestAnimationFrame(tick);
+  }
+  handFrameId = requestAnimationFrame(tick);
+}
+
+function stopHandFrameLoop(){
+  if (handFrameId){ cancelAnimationFrame(handFrameId); handFrameId = null; }
+}
+
+// Track last-seen z & timestamp per fingertip to compute velocity and edge-detect touches.
+function fingerKey(handIdx, fingerName){ return handIdx + "-" + fingerName; }
+
+function onHandResults(results){
+  const landmarks = results.multiHandLandmarks || [];
+  const count = landmarks.length;
+  if (count > 0){
+    STATE.handsCount = count;
+    lastHandSeenAt = performance.now();
+  }
+  // Brief grace period so status doesn't flicker when tracking momentarily drops a frame.
+  STATE.handDetected = count > 0 || (performance.now() - lastHandSeenAt < 450 && STATE.handsCount > 0);
+
+  resizeOverlayIfNeeded();
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  const now = performance.now() / 1000;
+  const seenThisFrame = new Set();
+  const activelyTouchingKeys = new Set();
+  let aimKeyName = null;
+
+  if (count > 0){
+    landmarks.forEach((handLm, handIdx) => {
+      drawLandmarks(handLm, handIdx);
+
+      const pinching = isHandPinching(handLm);
+      const pinchStateKey = "pinch-" + handIdx;
+      seenThisFrame.add(pinchStateKey);
+
+      // --- Pinch-to-play (primary): thumb+index centroid over key = press ---
+      if (pinching){
+        const { nx, ny } = getPinchPlayPoint(handLm);
+        const { x: sx, y: sy } = screenPointFromNormalized(nx, ny);
+        const key = findKeyAtScreenPoint(sx, sy);
+        drawPlayPoint(sx, sy, "#ffb454");
+
+        const prev = STATE.fingerStates[pinchStateKey] || { touching:false, keyName:null, pressFrames:0 };
+        const pressFrames = key ? (prev.pressFrames || 0) + 1 : 0;
+        let isTouchingNow = prev.touching;
+
+        if (key){
+          key.hover = true;
+          if (!aimKeyName) aimKeyName = fullNoteName(key);
+          if (!prev.touching && pressFrames >= CONFIG.pinchConfirmFrames) isTouchingNow = true;
+          else if (prev.touching) isTouchingNow = true;
+
+          if (isTouchingNow && (!prev.touching || prev.keyName !== fullNoteName(key))){
+            if (prev.touching && prev.keyName && prev.keyName !== fullNoteName(key)) releaseKeyByName(prev.keyName);
+            pressKey(key, 0.72);
+          }
+        } else if (prev.touching){
+          releaseKeyByName(prev.keyName);
+          isTouchingNow = false;
+        }
+
+        if (isTouchingNow && key) activelyTouchingKeys.add(fullNoteName(key));
+        STATE.fingerStates[pinchStateKey] = {
+          touching: isTouchingNow, keyName: isTouchingNow && key ? fullNoteName(key) : null,
+          pressFrames, t: now,
+        };
+      } else {
+        const prev = STATE.fingerStates[pinchStateKey];
+        if (prev?.touching && prev.keyName) releaseKeyByName(prev.keyName);
+        STATE.fingerStates[pinchStateKey] = { touching:false, keyName:null, pressFrames:0, t:now };
+      }
+
+      // --- Fingertip poke (secondary): other fingers, or index when not pinching ---
+      Object.entries(FINGER_TIPS).forEach(([fingerName, idx]) => {
+        if (fingerName === "index" && pinching) return;
+
+        const lm = handLm[idx];
+        const fkey = fingerKey(handIdx, fingerName);
+        seenThisFrame.add(fkey);
+
+        const pokeDepth = getFingerPokeDepth(handLm, idx);
+        const { press: pressMargin, release: releaseMargin } = getPokeMargins();
+        const { x: screenX, y: screenY } = screenPointFromNormalized(lm.x, lm.y);
+        const key = findKeyAtScreenPoint(screenX, screenY);
+
+        const prev = STATE.fingerStates[fkey] || {
+          pokeDepth, t:now, touching:false, keyName:null, restPoke:pokeDepth, pressFrames:0,
+        };
+        const dt = Math.max(0.001, now - prev.t);
+        const dpoke = pokeDepth - (prev.pokeDepth ?? pokeDepth);
+        const velocity = dpoke / dt;
+
+        let restPoke = prev.restPoke ?? pokeDepth;
+        if (key && !prev.touching){
+          restPoke = restPoke + (pokeDepth - restPoke) * 0.08;
+        }
+
+        const wantsPress = key && pokeDepth > restPoke + pressMargin;
+        const pressFrames = wantsPress ? (prev.pressFrames || 0) + 1 : 0;
+
+        let isTouchingNow = prev.touching;
+        if (!prev.touching){
+          if (pressFrames >= CONFIG.pressConfirmFrames) isTouchingNow = true;
+        } else {
+          if (!key || pokeDepth < restPoke + releaseMargin) isTouchingNow = false;
+        }
+
+        if (key){
+          key.hover = true;
+          if (!aimKeyName) aimKeyName = fullNoteName(key);
+          if (isTouchingNow && (!prev.touching || prev.keyName !== fullNoteName(key))){
+            if (prev.touching && prev.keyName && prev.keyName !== fullNoteName(key)) releaseKeyByName(prev.keyName);
+            pressKey(key, velocityToGain(Math.max(0, velocity)));
+          } else if (!isTouchingNow && prev.touching){
+            releaseKeyByName(prev.keyName);
+          }
+        } else if (prev.touching){
+          releaseKeyByName(prev.keyName);
+        }
+
+        if (isTouchingNow && key) activelyTouchingKeys.add(fullNoteName(key));
+
+        STATE.fingerStates[fkey] = {
+          pokeDepth, restPoke, t:now, pressFrames,
+          touching: isTouchingNow,
+          keyName: isTouchingNow && key ? fullNoteName(key) : null,
+        };
+      });
+    });
+  }
+
+  STATE.aimKeyName = aimKeyName;
+
+  // Any fingers that disappeared from view this frame should release their keys.
+  Object.keys(STATE.fingerStates).forEach(fkey => {
+    if (!seenThisFrame.has(fkey)){
+      const st = STATE.fingerStates[fkey];
+      if (st && st.touching && st.keyName) releaseKeyByName(st.keyName);
+      delete STATE.fingerStates[fkey];
+    }
+  });
+
+  // Safety net: silence any notes that no finger is actively holding (unless sustain is on).
+  if (!STATE.sustain){
+    Array.from(STATE.activeNoteLabels).forEach(id => {
+      if (!activelyTouchingKeys.has(id)) releaseKeyByName(id);
+    });
+  }
+
+  updateHandStatusUI(count);
+  updateKeyHoverVisuals();
+}
+
+function drawPlayPoint(screenX, screenY, color){
+  // Visual aim dot on the overlay (convert screen px -> canvas px).
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  const bw = window.innerWidth, bh = window.innerHeight;
+  if (!vw || !vh) return;
+  const mediaAspect = vw / vh, boxAspect = bw / bh;
+  let renderW, renderH, offsetX = 0, offsetY = 0;
+  if (boxAspect > mediaAspect){ renderW = bw; renderH = bw / mediaAspect; offsetY = (renderH - bh) / 2; }
+  else { renderH = bh; renderW = bh * mediaAspect; offsetX = (renderW - bw) / 2; }
+  let cx = (screenX + offsetX) / renderW * vw;
+  let cy = (screenY + offsetY) / renderH * vh;
+  if (STATE.mirrored) cx = vw - cx;
+  overlayCtx.fillStyle = color;
+  overlayCtx.beginPath();
+  overlayCtx.arc(cx, cy, 7, 0, Math.PI * 2);
+  overlayCtx.fill();
+  overlayCtx.strokeStyle = "#ffffff";
+  overlayCtx.lineWidth = 1.5;
+  overlayCtx.stroke();
+}
+
+function updateKeyHoverVisuals(){
+  KEYS.forEach(k => {
+    if (k.isPressed) return;
+    const mat = k.mesh.material;
+    const isAim = STATE.aimKeyName === fullNoteName(k);
+    if (k.hover){
+      mat.emissive = new THREE.Color(isAim ? "#ffb454" : "#5ef2ff");
+      mat.emissiveIntensity = isAim ? 0.42 : 0.22;
+    } else if (!k.expectedNext){
+      mat.emissiveIntensity = 0;
+    }
+    k.hover = false;
+  });
+}
+
+function landmarkToOverlayPx(lm){
+  const x = lm.x * overlayCanvas.width;
+  const y = lm.y * overlayCanvas.height;
+  return { x, y };
+}
+
+function drawLandmarks(landmarks, handIdx){
+  const color = HAND_COLORS[handIdx % HAND_COLORS.length];
+  const lineColor = color + "aa";
+
+  overlayCtx.strokeStyle = lineColor;
+  overlayCtx.lineWidth = 2;
+  overlayCtx.lineCap = "round";
+  HAND_CONNECTIONS.forEach(([a, b]) => {
+    const p1 = landmarkToOverlayPx(landmarks[a]);
+    const p2 = landmarkToOverlayPx(landmarks[b]);
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(p1.x, p1.y);
+    overlayCtx.lineTo(p2.x, p2.y);
+    overlayCtx.stroke();
+  });
+
+  overlayCtx.fillStyle = color;
+  Object.values(FINGER_TIPS).forEach(idx => {
+    const p = landmarkToOverlayPx(landmarks[idx]);
+    overlayCtx.beginPath();
+    overlayCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    overlayCtx.fill();
+  });
+}
+
+function resizeOverlayIfNeeded(){
+  // Match the canvas's *intrinsic* pixel size to the video's native resolution (not the
+  // viewport size). Because both #webcam and #overlay-canvas share the same CSS box and
+  // object-fit:cover rule, giving them the same intrinsic aspect ratio keeps every
+  // landmark pixel-aligned with the visible video, however the window is sized/cropped.
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  if (vw && vh && (overlayCanvas.width !== vw || overlayCanvas.height !== vh)){
+    overlayCanvas.width = vw;
+    overlayCanvas.height = vh;
+    computeKeyScreenRects();
+  }
+}
+
+/* --------------------------------------------------------------------------------
+   6. NOTE TRIGGERING (bridges hand tracking -> audio + 3D visuals + practice mode)
+   -------------------------------------------------------------------------------- */
+function pressKey(key, gain){
+  Audio_.init();
+  Audio_.resume();
+  const id = fullNoteName(key);
+  Audio_.noteOn(key, gain);
+  setKeyVisualPressed(key, true, STATE.practiceMode ? "#ffb454" : "#5ef2ff");
+  STATE.activeNoteLabels.add(id);
+  if (STATE.practiceMode) PracticeMode.onNotePlayed(id);
+}
+
+function releaseKeyByName(fullName){
+  const key = keyMeshByFullName[fullName];
+  if (!key) return;
+  Audio_.noteOff(fullName, STATE.sustain);
+  if (!STATE.sustain){
+    setKeyVisualPressed(key, false);
+    STATE.activeNoteLabels.delete(fullName);
+  } else {
+    // Keep the key glowing while sustain holds the sound; it will clear on sustain-off sweep.
+    STATE.activeNoteLabels.delete(fullName);
+    setTimeout(() => setKeyVisualPressed(key, false), CONFIG.sustainReleaseTime*1000*0.9);
+  }
+}
+
+function toggleSustain(force){
+  STATE.sustain = (typeof force === "boolean") ? force : !STATE.sustain;
+  document.getElementById("btn-sustain").classList.toggle("active", STATE.sustain);
+  document.getElementById("dot-sustain").classList.toggle("on", STATE.sustain);
+  document.getElementById("stat-sustain").lastChild.textContent = STATE.sustain ? "On" : "Off";
+  if (!STATE.sustain){
+    Audio_.releaseAllSustained();
+    KEYS.forEach(k => setKeyVisualPressed(k, false));
+    STATE.activeNoteLabels.clear();
+  }
+}
+
+/* --------------------------------------------------------------------------------
+   7. PRACTICE MODE — "Twinkle Twinkle Little Star"
+   -------------------------------------------------------------------------------- */
+const PracticeMode = (() => {
+  // Note names only (octave 4), matched against whatever octave the user actually plays in
+  // the octave is ignored for matching so the song is playable anywhere on the keyboard.
+  const SONG = ["C","C","G","G","A","A","G", "F","F","E","E","D","D","C",
+                "G","G","F","F","E","E","D", "G","G","F","F","E","E","D",
+                "C","C","G","G","A","A","G", "F","F","E","E","D","D","C"];
+  let index = 0;
+  let score = 0;
+  let streak = 0;
+  let lastAdvanceTime = 0;
+
+  function baseNoteOf(fullName){ return fullName.replace(/[0-9]/g, ""); }
+
+  function render(){
+    const seqEl = document.getElementById("practice-sequence");
+    seqEl.innerHTML = "";
+    const windowStart = Math.max(0, index-2);
+    const windowEnd = Math.min(SONG.length, index+6);
+    for (let i = windowStart; i < windowEnd; i++){
+      const span = document.createElement("span");
+      span.className = "seq-note" + (i===index ? " next" : (i<index ? " done" : ""));
+      span.textContent = SONG[i];
+      seqEl.appendChild(span);
+    }
+    document.getElementById("practice-score").textContent = score;
+    document.getElementById("practice-streak").textContent = streak;
+    highlightNextKey();
+  }
+
+  function highlightNextKey(){
+    // Clear previous idle highlight tint, then tint any key matching the next expected note.
+    KEYS.forEach(k => { k.expectedNext = false; });
+    const expected = SONG[index];
+    KEYS.forEach(k => { if (k.name === expected) k.expectedNext = true; });
+  }
+
+  function feedback(text, kind){
+    const el = document.getElementById("practice-feedback");
+    el.textContent = text;
+    el.className = kind || "";
+  }
+
+  function onNotePlayed(fullName){
+    if (index >= SONG.length){ return; }
+    const played = baseNoteOf(fullName);
+    const expected = SONG[index];
+    const now = performance.now()/1000;
+    const sinceLast = now - lastAdvanceTime;
+
+    if (played === expected){
+      let verdict = "Correct!";
+      if (lastAdvanceTime !== 0 && sinceLast < 0.15) verdict = "Too early";
+      else if (lastAdvanceTime !== 0 && sinceLast > 6) verdict = "Too late";
+
+      feedback(verdict, verdict === "Correct!" ? "correct" : "wrong");
+      score += verdict === "Correct!" ? 10 : 4;
+      streak = verdict === "Correct!" ? streak+1 : 0;
+      index++;
+      lastAdvanceTime = now;
+      if (index >= SONG.length){
+        feedback("Song complete! 🎉", "correct");
+      }
+      render();
+    } else {
+      feedback("Missed (expected " + expected + ")", "wrong");
+      streak = 0;
+      render();
+    }
+  }
+
+  function reset(){
+    index = 0; score = 0; streak = 0; lastAdvanceTime = 0;
+    feedback("Get ready…");
+    render();
+  }
+
+  return { onNotePlayed, reset, render };
+})();
+
+function togglePracticeMode(force){
+  STATE.practiceMode = (typeof force === "boolean") ? force : !STATE.practiceMode;
+  document.getElementById("btn-practice").classList.toggle("active", STATE.practiceMode);
+  document.getElementById("practice-panel").classList.toggle("show", STATE.practiceMode);
+  if (STATE.practiceMode) PracticeMode.reset();
+  else KEYS.forEach(k => k.expectedNext = false);
+}
+
+/* --------------------------------------------------------------------------------
+   8. CALIBRATION
+   Key x/y position is now handled automatically by screen-space projection (see
+   computeKeyScreenRects), so the only thing left to calibrate per-person is touch
+   *depth*: how far "toward the camera" counts as a press. We ask the user to hold
+   their hand at a relaxed, hovering distance above the piano, sample their index
+   fingertip's resting depth for a few seconds, and set the touch threshold a small
+   margin closer than that resting point.
+   -------------------------------------------------------------------------------- */
+function runCalibration(){
+  const modal = document.getElementById("calib-modal");
+  const bar = document.getElementById("calib-progress-bar");
+  const statusEl = document.getElementById("calib-status");
+  modal.classList.add("show");
+  STATE.calibration.active = true;
+
+  const samples = [];
+  const duration = 3000;
+  const start = performance.now();
+  const PRESS_MARGIN = 0.012;
+
+  function sample(){
+    if (!STATE.calibration.active) return;
+    const elapsed = performance.now() - start;
+    bar.style.width = Math.min(100, (elapsed/duration)*100) + "%";
+
+    const lastHand = window.__lastHandLandmarks;
+    if (lastHand){
+      statusEl.textContent = "Tracking hand… hold steady, don't press";
+      samples.push(getFingerPokeDepth(lastHand, FINGER_TIPS.index));
+    } else {
+      statusEl.textContent = "Waiting for hand…";
+    }
+
+    if (elapsed < duration){
+      requestAnimationFrame(sample);
+    } else {
+      if (samples.length > 10){
+        const restingPoke = samples.reduce((a,b)=>a+b, 0) / samples.length;
+        const sensAdjust = (0.5 - STATE.sensitivity) * 0.022;
+        STATE.calibration.pokeOffset = (restingPoke + PRESS_MARGIN) - CONFIG.basePokeMargin - sensAdjust;
+        statusEl.textContent = "Calibration complete! Poke or pinch over a key to play.";
+      } else {
+        statusEl.textContent = "Not enough tracking — using defaults.";
+      }
+      setTimeout(() => {
+        modal.classList.remove("show");
+        STATE.calibration.active = false;
+      }, 900);
+    }
+  }
+  requestAnimationFrame(sample);
+}
+
+/* --------------------------------------------------------------------------------
+   9. UI WIRING
+   -------------------------------------------------------------------------------- */
+let lastHandSeenAt = 0;
+function updateHandStatusUI(liveCount){
+  const count = typeof liveCount === "number" ? liveCount : (STATE.handDetected ? STATE.handsCount : 0);
+  document.getElementById("dot-hand").classList.toggle("on", STATE.handDetected);
+
+  let handLabel = "Not found";
+  if (STATE.handDetected){
+    if (count >= 2) handLabel = "2 hands";
+    else if (count === 1) handLabel = "1 hand";
+    else handLabel = STATE.handsCount >= 2 ? "2 hands" : "1 hand";
+  }
+  document.getElementById("stat-hand").lastChild.textContent = handLabel;
+  document.getElementById("stat-aim").textContent = STATE.aimKeyName || "—";
+
+  const labels = Array.from(STATE.activeNoteLabels);
+  document.getElementById("notes-playing").textContent = labels.length ? labels.join(", ") : "—";
+
+  const hint = document.getElementById("instructions-hint");
+  if (STATE.cameraRunning && !STATE.handDetected && lastHandSeenAt === 0){
+    hint.textContent = "No hands detected yet — hold one or both hands up, palms facing the camera, about arm's length away, with good lighting on your hands.";
+  } else if (STATE.cameraRunning && !STATE.handDetected && performance.now() - lastHandSeenAt > 4000){
+    hint.textContent = "Lost tracking — move your hands back into frame, spread your fingers slightly, or try more even lighting.";
+  } else if (STATE.handDetected && count === 1){
+    hint.textContent = "1 hand tracked — poke a fingertip toward the camera over a key, or pinch thumb+index to play.";
+  } else {
+    hint.textContent = STATE.aimKeyName
+      ? `Target: ${STATE.aimKeyName} — pinch thumb+index or poke forward to play`
+      : "Pinch thumb+index over a key to play. Target key shows in the status panel when aligned.";
+  }
+}
+
+function wireUI(){
+  document.getElementById("btn-camera").addEventListener("click", handleStartCameraClick);
+  document.getElementById("btn-boot-start").addEventListener("click", handleStartCameraClick);
+
+  document.getElementById("btn-sustain").addEventListener("click", () => toggleSustain());
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space"){ e.preventDefault(); toggleSustain(); }
+  });
+
+  document.getElementById("btn-practice").addEventListener("click", () => togglePracticeMode());
+  document.getElementById("btn-calibrate").addEventListener("click", runCalibration);
+
+  document.getElementById("slider-volume").addEventListener("input", (e) => {
+    Audio_.setVolume(parseInt(e.target.value,10)/100);
+  });
+  document.getElementById("slider-sensitivity").addEventListener("input", (e) => {
+    STATE.sensitivity = parseInt(e.target.value,10)/100;
+  });
+  document.getElementById("slider-threshold").addEventListener("input", (e) => {
+    STATE.calibration.pokeOffset = (parseInt(e.target.value,10)-50)/100 * 0.02;
+  });
+  document.getElementById("chk-mirror").addEventListener("change", (e) => {
+    setMirrored(e.target.checked);
+  });
+  setMirrored(STATE.mirrored);
+}
+
+function setMirrored(on){
+  STATE.mirrored = on;
+  document.getElementById("webcam").classList.toggle("mirrored", on);
+  document.getElementById("overlay-canvas").classList.toggle("mirrored", on);
+}
+
+async function handleStartCameraClick(){
+  const bootError = document.getElementById("boot-error");
+  bootError.style.display = "none";
+  const camBtn = document.getElementById("btn-camera");
+  camBtn.textContent = "Starting…";
+
+  try {
+    Audio_.init();
+    Audio_.resume();
+    camBtn.textContent = "Loading tracker…";
+    await initHandTracking();
+    camBtn.textContent = "Starting camera…";
+    await startCameraFeed();
+
+    document.getElementById("dot-camera").classList.add("on");
+    document.getElementById("stat-camera").lastChild.textContent = "Live";
+    camBtn.textContent = "■ Camera Live";
+    camBtn.classList.add("active");
+    document.getElementById("boot-overlay").classList.add("hide");
+  } catch (err){
+    console.error(err);
+    STATE.cameraRunning = false;
+    stopHandFrameLoop();
+    if (videoEl.srcObject){
+      videoEl.srcObject.getTracks().forEach(t => t.stop());
+      videoEl.srcObject = null;
+    }
+    camBtn.textContent = "▶ Start Camera";
+    let msg = "Could not access the camera. ";
+    if (err && err.name === "NotAllowedError") msg += "Camera permission was denied — please allow camera access and try again.";
+    else if (err && err.name === "NotFoundError") msg += "No camera device was found.";
+    else if (location.protocol === "file:") msg += "Camera access is blocked on file:// pages — serve this file over http://localhost or HTTPS.";
+    else msg += (err && err.message) ? err.message : "Please check permissions and try again.";
+    bootError.textContent = msg;
+    bootError.style.display = "block";
+  }
+}
+
+/* --------------------------------------------------------------------------------
+   10. MAIN RENDER LOOP
+   -------------------------------------------------------------------------------- */
+let lastFpsSample = performance.now();
+let frameCount = 0;
+
+function renderLoop(){
+  requestAnimationFrame(renderLoop);
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - STATE.lastFrameTime) / 1000);
+  STATE.lastFrameTime = now;
+
+  // Practice-mode idle highlight (amber pulse) for the next expected key, when not pressed.
+  KEYS.forEach(k => {
+    if (STATE.practiceMode && k.expectedNext && !k.isPressed){
+      const pulse = 0.25 + Math.sin(now/300) * 0.15;
+      k.mesh.material.emissive = new THREE.Color("#ffb454");
+      k.mesh.material.emissiveIntensity = Math.max(0, pulse);
+    }
+  });
+
+  animateKeys(dt);
+  renderer.render(scene, camera);
+
+  frameCount++;
+  if (now - lastFpsSample > 500){
+    STATE.fps = Math.round((frameCount * 1000) / (now - lastFpsSample));
+    document.getElementById("stat-fps").textContent = STATE.fps;
+    frameCount = 0;
+    lastFpsSample = now;
+  }
+}
+
+// Keep a handle to the latest raw landmarks for calibration sampling.
+function onHandResultsWrapper(results){
+  const hands = results.multiHandLandmarks || [];
+  window.__lastHandLandmarks = hands[0] || null;
+  onHandResults(results);
+}
+
+/* --------------------------------------------------------------------------------
+   11. BOOTSTRAP
+   -------------------------------------------------------------------------------- */
+window.addEventListener("DOMContentLoaded", () => {
+  initThreeScene();
+  wireUI();
+  requestAnimationFrame(renderLoop);
+});
+
+</script>
+</body>
+</html>
